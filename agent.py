@@ -1,5 +1,6 @@
 import json
 import logging
+import decimal
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 from pydantic import BaseModel
@@ -110,7 +111,7 @@ class AnalystIAGraph:
     def __init__(self, agent_prompt):
         self.agent_prompt = agent_prompt
         # Configurar el modelo de lenguaje
-        self.llm = mllOpenIA('o3-mini')
+        self.llm = mllOpenIA('gpt-4.1-nano')
         sg = StateGraph(FlowState)
 
         # Definir nodos
@@ -1127,12 +1128,17 @@ class AnalystIAGraph:
     @staticmethod
     def _serialise(obj: Any) -> Any:
         """Serializa objetos BaseModel y secuencias"""
+        import decimal 
+        if isinstance(obj, decimal.Decimal):
+            return float(obj)
         if isinstance(obj, BaseModel):
             return obj.dict() if hasattr(obj, 'dict') else obj.model_dump()
         if isinstance(obj, Sequence) and not isinstance(obj, str):
             return [AnalystIAGraph._serialise(o) for o in obj]
+        if isinstance(obj, dict):
+            return {k: AnalystIAGraph._serialise(v) for k, v in obj.items()}
         return obj
-
+        
     
     def run(self, segments: List[Dict[str, str]]) -> Dict[str, Any]:
         """
