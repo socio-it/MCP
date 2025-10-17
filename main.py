@@ -109,48 +109,47 @@ def add_employee(
 @app.tool
 def get_resumen(messages: str) -> Dict[str, Any]:
     """Genera un resumen y análisis inteligente de consultas sobre empleados"""
+    import os, json
     try:
-        import json
-        
-        # Convertir el string JSON a una lista de diccionarios
+        # --- 1. Normalización de entrada ---
         if isinstance(messages, str):
             try:
                 messages_list = json.loads(messages)
             except json.JSONDecodeError:
-                # Si no es JSON válido, crear una estructura básica
                 messages_list = [{"role": "user", "content": messages}]
         else:
             messages_list = messages
-            
-        # Verificar que tenemos la API key de OpenAI
+
+        # --- 2. Verificación de API Key ---
         if not os.environ.get("OPENAI_API_KEY"):
-            return {
-                "error": "OPENAI_API_KEY no está configurada en las variables de entorno"
-            }
-        
-        # Usar el nuevo agente mejorado
+            return {"error": "OPENAI_API_KEY no está configurada"}
+
+        # --- 3. Ejecución del agente ---
         engine = RetellIAGraph()
         result = engine.run(messages_list)
-        
-        # El nuevo agente devuelve un diccionario completo con más información
+
+        # --- 4. Serialización segura del análisis completo ---
+        safe_result = json.dumps(result, ensure_ascii=False, indent=2)
+
+        # --- 5. Retorno seguro con todos los campos principales ---
         return {
             "success": True,
-            "analysis": result,
+            "summary": result.get("summary", "No se pudo generar resumen"),
+            "analysis": safe_result,  # todo el resultado en texto plano JSON
+            "sql_query": result.get("sql_query"),
+            "sql_queries": result.get("sql_queries", []),
+            "clarification_needed": result.get("clarification_needed"),
             "is_ambiguous": result.get("is_ambiguous", False),
             "insufficient_data": result.get("insufficient_data", False),
-            "clarification_needed": result.get("clarification_needed"),
             "requires_multiple_queries": result.get("requires_multiple_queries", False),
-            "sql_queries": result.get("sql_queries", []),
-            "all_sql_results": result.get("all_sql_results", []),
-            "summary": result.get("summary", "No se pudo generar resumen"),
-            "sql_query": result.get("sql_query"),
-            "data_results": result.get("sql_results")
+            # estos dos campos se devuelven como texto plano para evitar conflicto
+            "data_results": json.dumps(result.get("sql_results", None), ensure_ascii=False),
+            "all_sql_results": json.dumps(result.get("all_sql_results", []), ensure_ascii=False)
         }
-        
+
     except Exception as e:
-        return {
-            "error": f"Error al generar resumen: {str(e)}"
-        }
+        return {"error": f"Error al generar resumen: {str(e)}"}
+
 
 @app.tool
 def query_employees_ai(query: str) -> Dict[str, Any]:
