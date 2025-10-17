@@ -82,7 +82,7 @@ class FlowState(BaseModel):
     
     # Control de reintentos
     retry_count: int = 0
-    max_retries: int = 3
+    max_retries: int = 2
     error_messages: List[str] = []  # Para almacenar mensajes de error de intentos anteriores
     
     def __getitem__(self, k):
@@ -681,7 +681,7 @@ class AnalystIAGraph:
         {json.dumps(validated_tables_info, indent=2)}
         {previous_errors}
         
-        Genera de 2 a 10 consultas que cubran la peticion del usuario:
+        Genera de 2 a 4 consultas que cubran la peticion del usuario:
 
         FORMATO DE RESPUESTA:
         QUERY_1: [consulta SQL 1]
@@ -759,7 +759,7 @@ class AnalystIAGraph:
             all_results = [dict(row) for row in rows] if rows else []
             
             # Limitar a máximo 300 filas para retorno, pero mantener info completa
-            limited_results = all_results[:300] if len(all_results) > 300 else all_results
+            limited_results = all_results[:300] if len(all_results) > 60 else all_results
             
             # Crear estructura consistente
             state.sql_results = {
@@ -767,7 +767,7 @@ class AnalystIAGraph:
                 "total_rows": len(all_results),
                 "returned_rows": len(limited_results),
                 "data": limited_results,
-                "truncated": len(all_results) > 300
+                "truncated": len(all_results) > 60
             }
             
             cursor.close()
@@ -828,7 +828,7 @@ class AnalystIAGraph:
                         "total_rows": len(all_query_results),
                         "returned_rows": len(limited_results),
                         "data": limited_results,
-                        "truncated": len(all_query_results) > 300,
+                        "truncated": len(all_query_results) > 60,
                         "success": True
                     })
                 else:
