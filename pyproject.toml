@@ -1,0 +1,14 @@
+[project]
+name = "mcp-db"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastmcp>=2.12.3",
+    "langchain>=0.3.27",
+    "langgraph>=0.6.10",
+    "psycopg2>=2.9.10",
+    "python-dotenv",
+    "langchain-openai>=0.2.0",  # 👈 agregado
+]
