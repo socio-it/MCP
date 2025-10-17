@@ -336,36 +336,49 @@ class AnalystIAGraph:
         messages_content = self._extract_content_from_messages(state.messages)
         
         # Primero, determinar si se necesitan múltiples queries
-        complexity_prompt = f"""
-        Analiza si la siguiente consulta requiere múltiples queries SQL para responder completamente:
-        
-        Consulta: {messages_content}
-        Análisis previo: {state.agent_analysis}
-        
+        complexity_prompt= f"""
+        fAnaliza si la siguiente consulta requiere múltiples queries SQL para responder completamente.
+        Entrada:
+        - Consulta: {messages_content}
+        - Análisis previo: {state.agent_analysis}
+
         Responde ÚNICAMENTE con:
         - SINGLE: si se puede responder con una sola query
         - MULTIPLE: si necesita múltiples queries para análisis completo
-        
+
         Reglas para MULTIPLE (si se cumple UNA, responde MULTIPLE):
-        1) Comparaciones entre grupos/departamentos o entre múltiples cortes.
-        2) Mezcla de agregados y listados/detalles (p.ej., promedio por zona + top-N filas).
-        3) Métricas derivadas que requieren calcular y luego reutilizar (medianas/percentiles/imputaciones) o submuestras intermedias.
-        4) Análisis temporal con más de un grano (por semana y por mes) o varias ventanas.
-        5) Validaciones previas necesarias: existencia de datos, null-rate, valores canónicos en filtros, o esquemas inciertos.
+        1) Comparaciones entre grupos/departamentos o múltiples cortes.
+        2) Mezcla de agregados y listados/detalles.
+        3) Métricas derivadas que se reutilizan (medianas/percentiles/imputaciones) o submuestras intermedias.
+        4) Temporal con más de un grano o varias ventanas.
+        5) Validaciones previas necesarias (existencia de datos, null-rate, dominios canónicos, esquema incierto).
         6) Unión de múltiples fuentes/tablas con lógicas distintas o claves dudosas.
-        7) Necesidad de sensibilidad/QA: antes-después, A/B, outliers, o verificación de sesgos.
-        8) Requisitos de performance que recomienden etapas (CTEs pesadas separadas, materializaciones).
-        
-        SReglas para SINGLE:
+        7) Sensibilidad/QA: antes-después, A/B, outliers, sesgos.
+        8) Performance que recomienda etapas (CTEs pesadas, materializaciones).
+
+        Reglas para SINGLE:
         A) Una sola tabla o joins triviales.
-        B) Un solo grano de análisis.
-        C) Solo agregación o solo detalle, no ambos.
+        B) Un solo grano.
+        C) Solo agregación o solo detalle.
         D) Sin dependencias de cálculos previos ni validaciones críticas.
 
-        Criterio adicional:
-        - Siempre debe generarse una query de reconocimiento inicial si es  MULTIPLE por cada tabla involucrada con la forma:
-        SELECT * FROM <nombre_de_la_tabla> LIMIT 10;
-        Esto sirve para explorar la estructura y validar su existencia antes de las queries principales.
+        Política de reconocimiento (solo si eliges MULTIPLE):
+        - Por cada tabla involucrada, generar primero:
+        1) SELECT * FROM <schema>.<tabla> LIMIT 10;
+        2) SELECT DISTINCT <campos_de_filtro_principales> FROM <schema>.<tabla>;
+        3) SELECT COUNT(*) AS n, COUNT(*) FILTER(WHERE <col_num> IS NULL) AS n_null,
+            MIN(<col_fecha>) AS min_date, MAX(<col_fecha>) AS max_date FROM <schema>.<tabla>;
+
+        Política de filtrado y normalización (guía para la fase de generación):
+        - Estandariza texto: usar UPPER(TRIM(col)) para comparar con literales canónicos.
+        - Canoniza dominios con CASE o join a dimensión si existe (ej.: zone_type → <WEALTHY, NON WEALTHY>).
+        - Fechas relativas: traducir “última semana/mes/N días” a rangos con CURRENT_DATE - INTERVAL 'N days'.
+        - Nulos: usar FILTER(WHERE col IS NOT NULL) en agregados; COALESCE en métricas de salida con fallback explícito.
+        - Tipos: castear seguro (NULLIF(col,'')::numeric) si hay numéricos en texto.
+        - Parámetros: no interpolar literales; usar placeholders (:country, :metric, :start_date, :end_date).
+        - Relajación progresiva si 0 filas: 1) quitar topes secundarios, 2) expandir dominios, 3) aflojar fechas, 4) revisar casing/espacios.
+        - Evitar ORDER BY en subconsultas salvo necesario. Solo ordenar en el resultado final.
+        - Dialecto por defecto: PostgreSQL. Si una función no existe, usar alternativa ANSI.
 
         Criterio de incertidumbre:
         - Si hay ambigüedad material sobre datos, esquemas o filtros, elige MULTIPLE.
@@ -403,8 +416,37 @@ class AnalystIAGraph:
         Consulta: {messages_content}
         Análisis previo: {state.agent_analysis}
         
+        Restricciones de salida:
+        - Solo SELECT (se permite WITH/CTEs).
+        - Sin comentarios, sin explicaciones, sin markdown.
+        - Devuelve ÚNICAMENTE la consulta SQL.
+        - Si no aplica SQL, responde: NO_SQL_NEEDED.
+
+        Política de construcción (aplícalas dentro de la misma consulta):
+        1) Parámetros:
+        - Usa placeholders con nombre: :country, :metric, :start_date, :end_date, etc.
+        2) Filtrado y normalización:
+        - Comparaciones de texto con UPPER(TRIM(col)) contra literales canónicos.
+        - Dominios canónicos vía CASE o join a dimensiones si procede.
+        - Fechas relativas con BETWEEN :start_date AND :end_date.
+        3) Nulos y tipos:
+        - Agregados con FILTER(WHERE col IS NOT NULL) o COALESCE según el caso.
+        - Casteo seguro para numéricos en texto: NULLIF(col,'')::numeric.
+        4) Joins:
+        - Solo los necesarios. Especifica ON claro y evita cartesianas.
+        - Elige LEFT JOIN si la ausencia de la tabla secundaria no debe descartar filas.
+        5) Métricas:
+        - Usa window functions cuando convenga (ROW_NUMBER, SUM() OVER, percentiles).
+        - Evita ORDER BY en CTEs; ordena solo en el resultado final.
+        6) Rendimiento:
+        - Proyecta solo columnas necesarias.
+        - Aplica filtros lo antes posible (en CTE base).
+        7) Tolerancia a 0 filas:
+        - No “relajes” filtros fuera de la consulta. Mantén exactitud; no inventes datos.
+        8) Dialecto:
+        - PostgreSQL por defecto. Para percentiles: percentile_cont(x) WITHIN GROUP (ORDER BY col).
+
         IMPORTANTE: 
-        - Solo genera consultas SELECT
         - NO incluyas ```sql ni ``` ni ningún markdown
         - NO incluyas comentarios ni explicaciones
         - Responde ÚNICAMENTE con la consulta SQL pura
@@ -430,7 +472,7 @@ class AnalystIAGraph:
         Consulta: {messages_content}
         Análisis previo: {state.agent_analysis}
         
-        Genera de 2 a 4 consultas que cubran diferentes aspectos del análisis ejemplo:
+        Genera de 2 a 10 consultas que cubran diferentes aspectos del análisis ejemplo:
         1. Datos agregados/estadísticas
         2. Datos específicos/listados
         3. Comparaciones/rankings
@@ -442,15 +484,44 @@ class AnalystIAGraph:
         QUERY_3: [consulta SQL 3]
         QUERY_4: [consulta SQL 4]
         
+        Estrategia y reglas:
+        1) Reconocimiento (si hay más de una tabla o filtros dudosos):
+        - Incluye primero queries de reconocimiento sobre cada tabla relevante:
+            - SELECT * FROM <schema>.<tabla> LIMIT 10
+            - SELECT DISTINCT <campos_clave_de_filtro> FROM <schema>.<tabla>
+        - Estas cuentan dentro del total de 2–4 queries.
+        2) Cobertura analítica:
+        - Incluye al menos dos de estos frentes según la consulta:
+            a) Agregados/estadísticas (AVG, SUM, COUNT DISTINCT, percentiles).
+            b) Listados/detalle con ORDER BY y LIMIT.
+            c) Comparaciones/rankings por grupo.
+            d) Análisis temporal con rangos de fechas o ventanas.
+        3) Filtrado y normalización:
+        - Comparar texto con UPPER(TRIM(col)) y literales canónicos.
+        - Fechas con BETWEEN :start_date AND :end_date.
+        - Usa placeholders con nombre (:country, :metric, etc.).
+
+        Politicas de Construcion:
+        - Normalización de texto en filtros: UPPER(TRIM(col)) = UPPER(TRIM(:param)).
+        - Dominios canónicos con CASE o join a dimensiones si existen.
+        - Fechas: BETWEEN :start_date AND :end_date. Para “últimos N días” asume parámetros.
+        - Nulos: usa FILTER(WHERE col IS NOT NULL) en agregados o COALESCE según convenga.
+        - Casteo seguro: NULLIF(col,'')::numeric para numéricos en texto.
+        - Joins: solo los necesarios; LEFT JOIN si no quieres descartar filas por faltantes.
+        - Evita ORDER BY en CTEs; ordenar solo en el resultado final.
+        - Proyecta solo columnas necesarias.
+
         IMPORTANTE:
         - Solo consultas SELECT
         - NO incluyas ```sql ni ``` ni markdown
         - Una consulta por línea con formato QUERY_N:
         - Si no necesitas todas las 4 queries, usa solo las necesarias
         
-        Ejemplo:
-        QUERY_1: SELECT department, AVG(salary) as avg_salary FROM employees GROUP BY department
-        QUERY_2: SELECT * FROM employees WHERE salary > 50000 ORDER BY salary DESC
+        Ejemplo mínimo:
+        QUERY_1: SELECT * FROM public.employees LIMIT 10
+        QUERY_2: SELECT DISTINCT UPPER(TRIM(department)) AS department FROM public.employees
+        QUERY_3: SELECT department, AVG(salary) AS avg_salary FROM public.employees GROUP BY department
+        QUERY_4: SELECT * FROM public.employees WHERE salary > :min_salary ORDER BY salary DESC
         """
         
         try:
@@ -496,8 +567,8 @@ class AnalystIAGraph:
             # Convertir a lista de diccionarios para serialización
             all_results = [dict(row) for row in rows] if rows else []
             
-            # Limitar a máximo 50 filas para retorno, pero mantener info completa
-            limited_results = all_results[:50] if len(all_results) > 50 else all_results
+            # Limitar a máximo 300 filas para retorno, pero mantener info completa
+            limited_results = all_results[:300] if len(all_results) > 300 else all_results
             
             # Crear estructura consistente
             state.sql_results = {
@@ -505,7 +576,7 @@ class AnalystIAGraph:
                 "total_rows": len(all_results),
                 "returned_rows": len(limited_results),
                 "data": limited_results,
-                "truncated": len(all_results) > 50
+                "truncated": len(all_results) > 300
             }
             
             cursor.close()
@@ -566,7 +637,7 @@ class AnalystIAGraph:
                         "total_rows": len(all_query_results),
                         "returned_rows": len(limited_results),
                         "data": limited_results,
-                        "truncated": len(all_query_results) > 50,
+                        "truncated": len(all_query_results) > 300,
                         "success": True
                     })
                 else:
