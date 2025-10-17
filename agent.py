@@ -362,6 +362,11 @@ class AnalystIAGraph:
         C) Solo agregación o solo detalle, no ambos.
         D) Sin dependencias de cálculos previos ni validaciones críticas.
 
+        Criterio adicional:
+        - Siempre debe generarse una query de reconocimiento inicial si es  MULTIPLE por cada tabla involucrada con la forma:
+        SELECT * FROM <nombre_de_la_tabla> LIMIT 10;
+        Esto sirve para explorar la estructura y validar su existencia antes de las queries principales.
+
         Criterio de incertidumbre:
         - Si hay ambigüedad material sobre datos, esquemas o filtros, elige MULTIPLE.
 
