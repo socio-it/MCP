@@ -1,6 +1,8 @@
 import json
 import logging
 import decimal
+import datetime
+import uuid
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 from pydantic import BaseModel
@@ -1125,21 +1127,62 @@ class AnalystIAGraph:
         
         return "\n".join(formatted)
 
-    @staticmethod
+    @staticmethod   
     def _serialise(obj: Any) -> Any:
-        """Serializa objetos BaseModel y secuencias"""
-        import decimal 
+        """Serializa objetos BaseModel y secuencias, incluyendo tipos especiales de PostgreSQL"""
+        import decimal
+        import datetime
+        import uuid
+        
+        # Manejar tipos Decimal (PostgreSQL)
         if isinstance(obj, decimal.Decimal):
             return float(obj)
+        
+        # Manejar tipos de fecha/hora (PostgreSQL)
+        if isinstance(obj, (datetime.date, datetime.datetime)):
+            return obj.isoformat()
+        
+        # Manejar tipo time (PostgreSQL)
+        if isinstance(obj, datetime.time):
+            return obj.isoformat()
+        
+        # Manejar tipo timedelta (PostgreSQL interval)
+        if isinstance(obj, datetime.timedelta):
+            total_seconds = obj.total_seconds()
+            hours, remainder = divmod(total_seconds, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            return f"{int(hours)}:{int(minutes)}:{seconds}"
+        
+        # Manejar UUIDs
+        if isinstance(obj, uuid.UUID):
+            return str(obj)
+        
+        # Manejar tipos bytes/bytea (PostgreSQL)
+        if isinstance(obj, bytes):
+            return obj.hex()
+        
+        # Manejar cualquier objeto con método __str__
+        if hasattr(obj, '__str__') and not isinstance(obj, (str, int, float, bool, type(None))):
+            obj_type = type(obj).__name__
+            # Solo convertir si no es un tipo básico
+            if obj_type not in ['str', 'int', 'float', 'bool', 'NoneType']:
+                return f"{str(obj)} (tipo: {obj_type})"
+            
+        # Manejar modelos Pydantic
         if isinstance(obj, BaseModel):
             return obj.dict() if hasattr(obj, 'dict') else obj.model_dump()
+            
+        # Manejar secuencias (listas, tuplas)
         if isinstance(obj, Sequence) and not isinstance(obj, str):
             return [AnalystIAGraph._serialise(o) for o in obj]
+            
+        # Manejar diccionarios recursivamente
         if isinstance(obj, dict):
             return {k: AnalystIAGraph._serialise(v) for k, v in obj.items()}
+            
         return obj
+            
         
-    
     def run(self, segments: List[Dict[str, str]]) -> Dict[str, Any]:
         """
         Ejecuta el grafo completo para procesar la consulta del usuario
