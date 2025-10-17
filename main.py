@@ -1,117 +1,18 @@
 import os
-from typing import List, Dict, Any, Optional
-from datetime import datetime
-import psycopg2
-from psycopg2.extras import RealDictCursor
+from typing import Dict, Any
 from fastmcp import FastMCP
-from agent import RetellIAGraph
 from dotenv import load_dotenv
 
-# Cargar variables de entorno desde .env
+from agent import AnalystIAGraph
+from prompts import prompt_comparador, prompt_cronista_temporal, prompt_curador_de_metricas, prompt_orquestador_de_agregacion, prompt_trade_offs
+
 load_dotenv()
 app = FastMCP("company-db-sever")
 
-def get_db_connection():
-    conn = psycopg2.connect(
-        host = os.environ.get("DB_HOST"),
-        port = int(os.environ.get("DB_PORT")),
-        user = os.environ.get("DB_USER"),
-        password = os.environ.get("DB_PASSWORD"),
-        database = os.environ.get("DB_DATABASE"),
-        cursor_factory= RealDictCursor
-    ) 
-    return conn
-
-@app.tool
-def list_employees(limit: int = 5) -> List[Dict[str, Any]]:
-    """Listar los empleados"""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        cursor.execute("""
-            SELECT id, name, position, department, salary, hire_date
-            FROM employees 
-            ORDER BY id 
-            LIMIT %s
-        """, (limit,))
-
-        rows = cursor.fetchall()
-        employees = []
-
-        for row in rows:
-            employees.append({
-                "id": row['id'],
-                "name": row['name'],
-                "position": row['position'],
-                "department": row['department'],
-                "salary": float(row['salary']),
-                "hire_date": str(row['hire_date'])
-            })
-        cursor.close()
-        conn.close()
-
-        return employees
-    except Exception as e:
-        return {
-            'error': f'Error al obtener los empleados {str(e)}'
-        }
-
-@app.tool
-def add_employee(
-    name: str,
-    position: str,
-    department: str,
-    salary: float,
-    hire_date: Optional[str] = None
-):
-    """Agrega un nuevo empleado"""
-    try:
-        if not name.strip():
-            return {"error": "El nombre es requerido"}
-        
-        if salary <= 0:
-            return {"error": "El salario debe ser mayor a 0"}
-
-        if not hire_date:
-            hire_date = datetime.now().strftime('%Y-%m-%d')
-        
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            INSERT INTO employees (name, position, department, salary, hire_date)
-            VALUES (%s, %s, %s, %s, %s)
-            RETURNING id, name, position, department, salary, hire_date
-        """, (name.strip(), position.strip(), department.strip(), salary, hire_date))
-        
-        new_employee = cursor.fetchone()
-        conn.commit()
-        
-        cursor.close()
-        conn.close()
-        
-        return {
-            "success": True,
-            "employee": {
-                "id": new_employee['id'],
-                "name": new_employee['name'],
-                "position": new_employee['position'],
-                "department": new_employee['department'],
-                "salary": float(new_employee['salary']),
-                "hire_date": str(new_employee['hire_date'])
-            }
-        }
-        
-    except Exception as e:
-        return {"error": f"Error al agregar empleado: {str(e)}"}
-    
-@app.tool
-def get_resumen(messages: str) -> Dict[str, Any]:
-    """Genera un resumen y análisis inteligente de consultas sobre empleados"""
+def get_analystIAGraph(messages: str, prompt: str) -> Dict[str, Any]:
+    """Generico: Genera un resumen y análisis inteligente de consultas sobre empleados"""
     import os, json
     try:
-        # --- 1. Normalización de entrada ---
         if isinstance(messages, str):
             try:
                 messages_list = json.loads(messages)
@@ -119,19 +20,13 @@ def get_resumen(messages: str) -> Dict[str, Any]:
                 messages_list = [{"role": "user", "content": messages}]
         else:
             messages_list = messages
-
-        # --- 2. Verificación de API Key ---
         if not os.environ.get("OPENAI_API_KEY"):
             return {"error": "OPENAI_API_KEY no está configurada"}
-
-        # --- 3. Ejecución del agente ---
-        engine = RetellIAGraph()
+        engine = AnalystIAGraph(agent_prompt=prompt)
         result = engine.run(messages_list)
 
-        # --- 4. Serialización segura del análisis completo ---
         safe_result = json.dumps(result, ensure_ascii=False, indent=2)
 
-        # --- 5. Retorno seguro con todos los campos principales ---
         return {
             "success": True,
             "summary": result.get("summary", "No se pudo generar resumen"),
@@ -149,44 +44,54 @@ def get_resumen(messages: str) -> Dict[str, Any]:
 
     except Exception as e:
         return {"error": f"Error al generar resumen: {str(e)}"}
-
+    
 
 @app.tool
-def query_employees_ai(query: str) -> Dict[str, Any]:
-    """Consulta inteligente de empleados usando IA - acepta preguntas en lenguaje natural"""
-    try:
-        # Verificar API key
-        if not os.environ.get("OPENAI_API_KEY"):
-            return {
-                "error": "OPENAI_API_KEY no está configurada en las variables de entorno"
-            }
-        
-        # Crear mensaje para el agente
-        messages = [{"role": "user", "content": query}]
-        
-        # Usar el agente para procesar la consulta
-        engine = RetellIAGraph()
-        result = engine.run(messages)
-        
-        return {
-            "success": True,
-            "query": query,
-            "is_ambiguous": result.get("is_ambiguous", False),
-            "insufficient_data": result.get("insufficient_data", False),
-            "clarification_needed": result.get("clarification_needed"),
-            "requires_multiple_queries": result.get("requires_multiple_queries", False),
-            "sql_queries": result.get("sql_queries", []),
-            "all_sql_results": result.get("all_sql_results", []),
-            "analysis": result.get("data_analysis"),
-            "sql_executed": result.get("sql_query"),
-            "results": result.get("sql_results"),
-            "summary": result.get("summary", "No se pudo procesar la consulta")
-        }
-        
-    except Exception as e:
-        return {
-            "error": f"Error al procesar consulta: {str(e)}"
-        }
+def curador_de_metricas(messages: str) -> Dict[str, Any]:
+   """
+   Analista multiagente con conexion a data que hace:
+   consultas de filtrado/ranking de KPIs. Entrega una especificación lista para el generador SQL.
+   Objetivo: 
+   Definir KPI, nivel, tiempo, filtros, orden, límite, baselines y criterios de calidad."""
+
+   return get_analystIAGraph(messages, prompt_curador_de_metricas)
+
+@app.tool
+def comparador(messages: str) -> Dict[str, Any]:
+   """
+   Analista multiagente con conexion a data que hace:
+   Desmenuza la consulta de comparación A vs B y entrega una especificación.
+   Objetivo:
+   Definir KPI de comparación, cohortes A/B, controles de mezcla, tiempo, filtros, diferenciales (abs, %) y campos requeridos en la salida."""
+
+   return get_analystIAGraph(messages, prompt_comparador)
+
+@app.tool
+def cronista_temporal(messages: str) -> Dict[str, Any]:
+   """
+   Analista multiagente con conexion a data que hace:
+   Analista para Cronista Temporal. Desmenuza consultas de evolución en el tiempo y entrega una especificación lista.
+   Objetivo:
+   Definir KPI temporal, granularidad, rango, comparativos entre periodos, detección de quiebres, nivel de análisis, filtros y criterios de calidad."""
+   return get_analystIAGraph(messages, prompt_cronista_temporal)
+
+@app.tool
+def orquestador_de_agregacion(messages: str) -> Dict[str, Any]:
+   """
+   Analista multiagente con conexion a data que hace:
+   Analista para Orquestador de Agregaciones. Desmenuza resúmenes por jerarquías y entrega una especificación lista.                
+   Objetivo:
+   Definir KPI agregado (directo o ponderado), nivel jerárquico, ponderador, cobertura, reconciliación padre–hijo, filtros y criterios de calidad."""
+   return get_analystIAGraph(messages, prompt_orquestador_de_agregacion)
+
+@app.tool
+def trade_offs(messages: str) -> Dict[str, Any]:
+   """
+   Analista multiagente con conexion a data que hace:
+   Analista para Buscador de Trade-offs. Desmenuza cruces “alto X / bajo Y” y entrega una especificación lista.
+   Objetivo:
+   Definir X y Y, nivel de análisis, umbrales alto/bajo, score de priorización, tiempo, filtros y criterios de calidad."""
+   return get_analystIAGraph(messages, prompt_trade_offs)
 
 @app.tool
 def get_query_details(query: str) -> Dict[str, Any]:
@@ -202,7 +107,7 @@ def get_query_details(query: str) -> Dict[str, Any]:
         messages = [{"role": "user", "content": query}]
         
         # Usar el agente para procesar la consulta
-        engine = RetellIAGraph()
+        engine = AnalystIAGraph()
         result = engine.run(messages)
         
         # Extraer información detallada de las queries

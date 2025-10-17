@@ -1,29 +1,56 @@
-import inspect
 import json
 import logging
-import os
 from typing import Any, Dict, List, Optional, Sequence, Union
 
-import psycopg2
-from langgraph.graph import END, START, StateGraph
-from psycopg2.extras import RealDictCursor
 from pydantic import BaseModel
+from langgraph.graph import END, START, StateGraph
+
 
 from client import mllOpenIA
+from utils import get_db_connection
 
-
-def get_db_connection():
-    """Establece conexión con la base de datos PostgreSQL"""
-    conn = psycopg2.connect(
-        host=os.environ.get("DB_HOST"),
-        port=int(os.environ.get("DB_PORT")),
-        user=os.environ.get("DB_USER"),
-        password=os.environ.get("DB_PASSWORD"),
-        database=os.environ.get("DB_DATABASE"),
-        cursor_factory=RealDictCursor
-    )
-    return conn
-
+dict_tables = {
+  "tables": [
+    {
+      "name": "raw_input_metrics",
+      "columns": [
+        { "name": "country", "type": "text" },
+        { "name": "city", "type": "text" },
+        { "name": "zone", "type": "text" },
+        { "name": "zone_type", "type": "text" },
+        { "name": "zone_prioritization", "type": "text" },
+        { "name": "metric", "type": "text" },
+        { "name": "l8w_roll", "type": "double precision" },
+        { "name": "l7w_roll", "type": "double precision" },
+        { "name": "l6w_roll", "type": "double precision" },
+        { "name": "l5w_roll", "type": "double precision" },
+        { "name": "l4w_roll", "type": "double precision" },
+        { "name": "l3w_roll", "type": "double precision" },
+        { "name": "l2w_roll", "type": "double precision" },
+        { "name": "l1w_roll", "type": "double precision" },
+        { "name": "l0w_roll", "type": "double precision" }
+      ]
+    },
+    {
+      "name": "raw_orders",
+      "columns": [
+        { "name": "country", "type": "text" },
+        { "name": "city", "type": "text" },
+        { "name": "zone", "type": "text" },
+        { "name": "metric", "type": "text" },
+        { "name": "l8w", "type": "integer" },
+        { "name": "l7w", "type": "integer" },
+        { "name": "l6w", "type": "integer" },
+        { "name": "l5w", "type": "integer" },
+        { "name": "l4w", "type": "integer" },
+        { "name": "l3w", "type": "integer" },
+        { "name": "l2w", "type": "integer" },
+        { "name": "l1w", "type": "integer" },
+        { "name": "l0w", "type": "integer" }
+      ]
+    }
+  ]
+}
 
 class FlowState(BaseModel):
     """Estado del flujo de procesamiento de consultas"""
@@ -48,11 +75,6 @@ class FlowState(BaseModel):
     requires_multiple_queries: bool = False
     current_query_index: int = 0
     
-    # Métricas de tokens (para futura implementación)
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
-
     def __getitem__(self, k):
         return getattr(self, k)
 
@@ -69,39 +91,35 @@ class FlowState(BaseModel):
     
 
 
-
-# ---------------------------------------------------------------------------
-# Retell AI Graph - Refactored
-# ---------------------------------------------------------------------------
-class RetellIAGraph:
+class AnalystIAGraph:
     """
     Agente mejorado para procesar consultas de base de datos con múltiples especialistas
     """
     
-    def __init__(self):
+    def __init__(self, agent_prompt):
+        self.agent_prompt = agent_prompt
         # Configurar el modelo de lenguaje
-        self.llm = mllOpenIA('gpt-4o')
-        
-        # Crear el grafo de estados
+        self.llm = mllOpenIA('gpt-5-mini-2025-08-07')
         sg = StateGraph(FlowState)
 
         # Definir nodos
         sg.add_node('ingest', self.ingest)
         sg.add_node('agent_coordinator', self.agent_coordinator)
         sg.add_node('ambiguity_detector', self.ambiguity_detector)
+        sg.add_node('clarification_handler', self.clarification_handler)
         sg.add_node('sql_agent', self.sql_agent)
         sg.add_node('sql_process', self.sql_process)
         sg.add_node('multi_query_processor', self.multi_query_processor)
         sg.add_node('sql_evaluator', self.sql_evaluator)
         sg.add_node('data_analyst', self.data_analyst)
-        sg.add_node('clarification_handler', self.clarification_handler)
+        
 
         # Definir edges
         sg.add_edge(START, 'ingest')
         sg.add_edge('ingest', 'agent_coordinator')
         sg.add_edge('agent_coordinator', 'ambiguity_detector')
         
-        # Edge condicional para detectar ambigüedades
+        # Edge ambigüedades
         sg.add_conditional_edges(
             'ambiguity_detector',
             lambda st: 'clarification_handler' if st.is_ambiguous or st.insufficient_data else 'sql_agent',
@@ -130,7 +148,7 @@ class RetellIAGraph:
     
     def ingest(self, state: FlowState) -> FlowState:
         """Inicializa el estado y prepara los datos de entrada"""
-        # Limpiar estados previos
+        # resetear
         state.agent_analysis = None
         state.sql_query = None
         state.sql_queries = []
@@ -146,7 +164,7 @@ class RetellIAGraph:
         state.requires_multiple_queries = False
         state.current_query_index = 0
         
-        # Convertir input a messages si es necesario
+        #Convertir input a messages
         if state.input and not state.messages:
             if isinstance(state.input[0], str):
                 state.messages = [{"role": "user", "content": " ".join(state.input)}]
@@ -161,23 +179,16 @@ class RetellIAGraph:
         messages_content = self._extract_content_from_messages(state.messages)
         
         prompt = f"""
-        Eres el agente coordinador principal. Analiza la siguiente consulta del usuario y:
+        Eres el agente coordinador principal. Analiza la siguiente consulta del usuario:
         
-        1. Identifica la intención principal (consulta de datos, análisis, reporte, etc.)
-        2. Extrae las entidades clave (tablas, campos, condiciones)
-        3. Determina qué tipo de análisis SQL se requiere
-        4. Proporciona contexto estructurado para los agentes especializados
-        5 estos son los campos de la tabla "employee":
-                "id": new_employee['id'],
-                "name": new_employee['name'],
-                "position": new_employee['position'],
-                "department": new_employee['department'],
-                "salary": float(new_employee['salary']),
-                "hire_date": str(new_employee['hire_date'])
+        {self.agent_prompt}
             
         Consulta del usuario:
         {messages_content}
         
+        La base de datos tiene esta estructura:
+        {json.dump(dict_tables)}
+
         Responde con un análisis claro y estructurado de la solicitud.
         """
         
@@ -201,13 +212,8 @@ class RetellIAGraph:
         Consulta del usuario: {messages_content}
         Análisis previo: {state.agent_analysis}
         
-        La base de datos tiene una tabla 'employees' con estos campos:
-        - id (integer)
-        - name (varchar) 
-        - position (varchar)
-        - department (varchar)
-        - salary (decimal)
-        - hire_date (date)
+        La base de datos tiene esta estructura:
+        {json.dump(dict_tables)}
         
         Evalúa si:
         1. La consulta es demasiado ambigua para generar una respuesta precisa
@@ -227,10 +233,9 @@ class RetellIAGraph:
         INSUFFICIENT_DATA: [explicación de qué datos faltan]
         
         Ejemplos:
-        - "Muestra empleados" → AMBIGUOUS: ¿Quieres ver todos los empleados o empleados de un departamento específico?
-        - "Empleados con mejor rendimiento" → INSUFFICIENT_DATA: No tengo datos de rendimiento, solo información básica como salario, puesto y departamento.
-        - "Lista empleados del departamento ventas" → CLEAR
-        """
+        - "Muestra datos" → AMBIGUOUS: ¿Quieres ver todos los registros o aplicar algún filtro?
+        - "Registros con valor máximo" → INSUFFICIENT_DATA: No se especifica la columna a evaluar.
+        - "Lista registros del campo categoría 'A'" → CLEAR"""
         
         try:
             response = self.llm.invoke(prompt).content.strip()
@@ -264,7 +269,67 @@ class RetellIAGraph:
             state.clarification_needed = None
             
         return state
-
+    
+    def clarification_handler(self, state: FlowState) -> FlowState:
+        """Maneja casos donde se necesita aclaración o faltan datos"""
+        
+        messages_content = self._extract_content_from_messages(state.messages)
+        
+        if state.is_ambiguous:
+            # Consulta ambigua - pedir aclaración
+            response = f"""
+            Tu consulta necesita más detalles para poder ayudarte mejor.
+            
+            📝 Consulta original: {messages_content}
+            
+            ❓ **Aclaración necesaria**: {state.clarification_needed}
+            
+            💡 **Información disponible**: Tengo acceso a datos de empleados incluyendo:
+            - Nombre, puesto, departamento
+            - Salario y fecha de contratación
+            - Identificador único de cada empleado
+            
+            Por favor, proporciona más detalles específicos para poder generar la consulta exacta que necesitas.
+            """
+            
+        elif state.insufficient_data:
+            # Datos insuficientes - explicar limitaciones
+            response = f"""
+            No puedo responder completamente a tu consulta debido a limitaciones en los datos disponibles.
+            
+            📝 Consulta original: {messages_content}
+            
+            ❌ **Limitación identificada**: {state.clarification_needed}
+            
+            📊 **Datos disponibles**: La base de datos contiene únicamente información básica de empleados:
+            - **Identificación**: ID, nombre
+            - **Puesto**: posición, departamento  
+            - **Compensación**: salario
+            - **Temporal**: fecha de contratación
+            
+            💡 **Sugerencia**: Puedo ayudarte con consultas relacionadas con esta información disponible. 
+            ¿Te gustaría reformular tu pregunta basándote en estos datos?
+            
+            **Ejemplos de lo que SÍ puedo hacer**:
+            - Listar empleados por departamento
+            - Calcular estadísticas salariales
+            - Analizar antigüedad de empleados
+            - Comparar departamentos por tamaño o salarios
+            """
+            
+        else:
+            # Fallback
+            response = f"""
+            Necesito más información para procesar tu consulta correctamente.
+            
+            📝 Consulta original: {messages_content}
+            
+            Por favor, proporciona más detalles específicos sobre lo que necesitas.
+            """
+        
+        state.data_analysis = response
+        return state
+    
     def sql_agent(self, state: FlowState) -> FlowState:
         """Agente especializado en generar consultas SQL (simple o múltiples)"""
         
@@ -276,8 +341,6 @@ class RetellIAGraph:
         
         Consulta: {messages_content}
         Análisis previo: {state.agent_analysis}
-        
-        Tabla disponible 'employees' con campos: id, name, position, department, salary, hire_date
         
         Responde ÚNICAMENTE con:
         - SINGLE: si se puede responder con una sola query
@@ -321,8 +384,6 @@ class RetellIAGraph:
         Consulta: {messages_content}
         Análisis previo: {state.agent_analysis}
         
-        Tabla 'employees' con campos: id, name, position, department, salary, hire_date
-        
         IMPORTANTE: 
         - Solo genera consultas SELECT
         - NO incluyas ```sql ni ``` ni ningún markdown
@@ -350,9 +411,7 @@ class RetellIAGraph:
         Consulta: {messages_content}
         Análisis previo: {state.agent_analysis}
         
-        Tabla 'employees' con campos: id, name, position, department, salary, hire_date
-        
-        Genera de 2 a 4 consultas que cubran diferentes aspectos del análisis:
+        Genera de 2 a 4 consultas que cubran diferentes aspectos del análisis ejemplo:
         1. Datos agregados/estadísticas
         2. Datos específicos/listados
         3. Comparaciones/rankings
@@ -659,67 +718,6 @@ class RetellIAGraph:
             
         return state
 
-    def clarification_handler(self, state: FlowState) -> FlowState:
-        """Maneja casos donde se necesita aclaración o faltan datos"""
-        
-        messages_content = self._extract_content_from_messages(state.messages)
-        
-        if state.is_ambiguous:
-            # Consulta ambigua - pedir aclaración
-            response = f"""
-            Tu consulta necesita más detalles para poder ayudarte mejor.
-            
-            📝 Consulta original: {messages_content}
-            
-            ❓ **Aclaración necesaria**: {state.clarification_needed}
-            
-            💡 **Información disponible**: Tengo acceso a datos de empleados incluyendo:
-            - Nombre, puesto, departamento
-            - Salario y fecha de contratación
-            - Identificador único de cada empleado
-            
-            Por favor, proporciona más detalles específicos para poder generar la consulta exacta que necesitas.
-            """
-            
-        elif state.insufficient_data:
-            # Datos insuficientes - explicar limitaciones
-            response = f"""
-            No puedo responder completamente a tu consulta debido a limitaciones en los datos disponibles.
-            
-            📝 Consulta original: {messages_content}
-            
-            ❌ **Limitación identificada**: {state.clarification_needed}
-            
-            📊 **Datos disponibles**: La base de datos contiene únicamente información básica de empleados:
-            - **Identificación**: ID, nombre
-            - **Puesto**: posición, departamento  
-            - **Compensación**: salario
-            - **Temporal**: fecha de contratación
-            
-            💡 **Sugerencia**: Puedo ayudarte con consultas relacionadas con esta información disponible. 
-            ¿Te gustaría reformular tu pregunta basándote en estos datos?
-            
-            **Ejemplos de lo que SÍ puedo hacer**:
-            - Listar empleados por departamento
-            - Calcular estadísticas salariales
-            - Analizar antigüedad de empleados
-            - Comparar departamentos por tamaño o salarios
-            """
-            
-        else:
-            # Fallback
-            response = f"""
-            Necesito más información para procesar tu consulta correctamente.
-            
-            📝 Consulta original: {messages_content}
-            
-            Por favor, proporciona más detalles específicos sobre lo que necesitas.
-            """
-        
-        state.data_analysis = response
-        return state
-
-    # ----------------------------- Métodos de utilidad -----------------------------------
     
     def _extract_content_from_messages(self, messages: List[Dict[str, str]]) -> str:
         """Extrae el contenido de los mensajes para procesamiento"""
@@ -823,7 +821,6 @@ class RetellIAGraph:
             return [RetellIAGraph._serialise(o) for o in obj]
         return obj
 
-    # ---------------------------- API ------------------------------
     
     def run(self, segments: List[Dict[str, str]]) -> Dict[str, Any]:
         """
