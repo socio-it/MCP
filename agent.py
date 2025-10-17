@@ -99,7 +99,7 @@ class AnalystIAGraph:
     def __init__(self, agent_prompt):
         self.agent_prompt = agent_prompt
         # Configurar el modelo de lenguaje
-        self.llm = mllOpenIA('o4-mini')
+        self.llm = mllOpenIA('o3-mini')
         sg = StateGraph(FlowState)
 
         # Definir nodos
