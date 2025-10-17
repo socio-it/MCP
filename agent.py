@@ -8,6 +8,7 @@ from langgraph.graph import END, START, StateGraph
 
 from client import mllOpenIA
 from utils import get_db_connection
+from prompts import prompt_multi_query, prompt_single_query
 
 dict_tables = {
   "tables": [
@@ -594,8 +595,6 @@ class AnalystIAGraph:
                 previous_errors += f"\nConsulta anterior que falló:\n{state.sql_query}\n"
         
         prompt = f"""
-        Genera una consulta SQL PostgreSQL para responder a:
-        
         Consulta: {messages_content}
         Análisis previo: {state.agent_analysis}
         Intento: {state.retry_count + 1} de {state.max_retries}
@@ -603,31 +602,7 @@ class AnalystIAGraph:
         INFORMACIÓN DE TABLAS VALIDADAS:
         {json.dumps(validated_tables_info, indent=2)}
         {previous_errors}
-        
-        Restricciones de salida:
-        - Solo SELECT (se permite WITH/CTEs).
-        - Sin comentarios, sin explicaciones, sin markdown.
-        - Devuelve ÚNICAMENTE la consulta SQL.
-        - Si no aplica SQL, responde: NO_SQL_NEEDED.
-
-        Estrategia y reglas:
-        1) Usa la información de tablas validadas en lugar de hacer queries de reconocimiento.
-        2) Cobertura analítica:
-        - Incluye al menos dos de estos frentes según la consulta:
-            a) Agregados/estadísticas (AVG, SUM, COUNT DISTINCT, percentiles).
-            b) Listados/detalle con ORDER BY y LIMIT.
-            c) Comparaciones/rankings por grupo.
-            d) Análisis temporal con rangos de fechas o ventanas.
-        3) Filtrado y normalización:
-        - Comparar texto con UPPER(TRIM(col)) y literales canónicos.
-        4) Verifica los nombres y tipos de columnas usando la información validada.
-        5) Si es un reintento, asegúrate de corregir los errores previos.
-
-        IMPORTANTE: 
-        - NO incluyas ```sql ni ``` ni ningún markdown
-        - NO incluyas comentarios ni explicaciones
-        - Responde ÚNICAMENTE con la consulta SQL pura
-        - Si no es posible generar SQL, responde: "NO_SQL_NEEDED"
+        {prompt_single_query}
         """
         
         try:
@@ -671,8 +646,6 @@ class AnalystIAGraph:
                     previous_errors += f"QUERY_{i+1}: {query}\n"
         
         prompt = f"""
-        Genera una lista de consultas SQL PostgreSQL para un análisis completo de:
-        
         Consulta: {messages_content}
         Análisis previo: {state.agent_analysis}
         Intento: {state.retry_count + 1} de {state.max_retries}
@@ -680,39 +653,7 @@ class AnalystIAGraph:
         INFORMACIÓN DE TABLAS VALIDADAS:
         {json.dumps(validated_tables_info, indent=2)}
         {previous_errors}
-        
-        Genera de 2 a 4 consultas que cubran la peticion del usuario:
-
-        FORMATO DE RESPUESTA:
-        QUERY_1: [consulta SQL 1]
-        QUERY_2: [consulta SQL 2]
-        QUERY_3: [consulta SQL 3]
-        QUERY_4: [consulta SQL 4]
-        
-        Estrategia y reglas:
-        1) Usa la información de tablas ya validadas en vez de hacer queries de reconocimiento.
-        2) Cobertura analítica:
-        - Incluye al menos dos de estos frentes según la consulta:
-            a) Agregados/estadísticas (AVG, SUM, COUNT DISTINCT, percentiles).
-            b) Listados/detalle con ORDER BY y LIMIT.
-            c) Comparaciones/rankings por grupo.
-            d) Análisis temporal con rangos de fechas o ventanas.
-        3) Filtrado y normalización:
-        - Comparar texto con UPPER(TRIM(col)) y literales canónicos.
-        4) Verifica los nombres y tipos de columnas usando la información validada.
-        5) Si es un reintento, asegúrate de corregir los errores previos de manera específica.
-
-        IMPORTANTE:
-        - Solo consultas SELECT
-        - NO incluyas ```sql ni ``` ni markdown
-        - Una consulta por línea con formato QUERY_N:
-        - Si no necesitas todas las 4 queries, usa solo las necesarias
-        
-        Ejemplo mínimo:
-        QUERY_1: SELECT department, AVG(salary) AS avg_salary FROM public.employees GROUP BY department
-        QUERY_2: SELECT * FROM public.employees WHERE salary > (SELECT AVG(salary) FROM public.employees) ORDER BY salary DESC LIMIT 10
-        QUERY_3: SELECT EXTRACT(YEAR FROM hire_date) AS year, COUNT(*) as hires FROM public.employees GROUP BY year ORDER BY year
-        QUERY_4: SELECT department, job_title, COUNT(*) as employee_count FROM public.employees GROUP BY department, job_title ORDER BY department, employee_count DESC
+        {prompt_multi_query}
         """
         
         try:
