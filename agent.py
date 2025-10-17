@@ -346,18 +346,30 @@ class AnalystIAGraph:
         - SINGLE: si se puede responder con una sola query
         - MULTIPLE: si necesita múltiples queries para análisis completo
         
-        Casos que requieren MULTIPLE:
-        - Comparaciones complejas entre departamentos
-        - Análisis que requieren cálculos estadísticos y listados
-        - Consultas que necesitan datos agregados Y detalles específicos
-        - Análisis temporales que requieren múltiples perspectivas
+        Reglas para MULTIPLE (si se cumple UNA, responde MULTIPLE):
+        1) Comparaciones entre grupos/departamentos o entre múltiples cortes.
+        2) Mezcla de agregados y listados/detalles (p.ej., promedio por zona + top-N filas).
+        3) Métricas derivadas que requieren calcular y luego reutilizar (medianas/percentiles/imputaciones) o submuestras intermedias.
+        4) Análisis temporal con más de un grano (por semana y por mes) o varias ventanas.
+        5) Validaciones previas necesarias: existencia de datos, null-rate, valores canónicos en filtros, o esquemas inciertos.
+        6) Unión de múltiples fuentes/tablas con lógicas distintas o claves dudosas.
+        7) Necesidad de sensibilidad/QA: antes-después, A/B, outliers, o verificación de sesgos.
+        8) Requisitos de performance que recomienden etapas (CTEs pesadas separadas, materializaciones).
         
-        Siempre intenta generar de menos a mas, primero queries sencillas y de reconocimiento, luego si las anteriores funciona
-        y es necesario mayor omplejidad genera mas complejas
+        SReglas para SINGLE:
+        A) Una sola tabla o joins triviales.
+        B) Un solo grano de análisis.
+        C) Solo agregación o solo detalle, no ambos.
+        D) Sin dependencias de cálculos previos ni validaciones críticas.
+
+        Criterio de incertidumbre:
+        - Si hay ambigüedad material sobre datos, esquemas o filtros, elige MULTIPLE.
+
         Ejemplos:
-        - "Lista empleados" → SINGLE
-        - "Análisis completo de salarios por departamento con empleados mejor pagados" → MULTIPLE
-        - "Estadísticas de contratación por año y departamento" → MULTIPLE
+        - “Lista empleados” → SINGLE
+        - “Análisis completo de salarios por departamento con empleados mejor pagados” → MULTIPLE
+        - “Estadísticas de contratación por año y departamento” → MULTIPLE
+        - “Calcular promedio de ‘Perfect Order’ imputando mediana por zona y compararlo entre ‘Wealthy’ y ‘Non Wealthy’” → MULTIPLE
         """
         
         try:
