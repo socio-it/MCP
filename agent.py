@@ -99,7 +99,7 @@ class AnalystIAGraph:
     def __init__(self, agent_prompt):
         self.agent_prompt = agent_prompt
         # Configurar el modelo de lenguaje
-        self.llm = mllOpenIA('gpt-5-mini-2025-08-07')
+        self.llm = mllOpenIA('o4-mini')
         sg = StateGraph(FlowState)
 
         # Definir nodos
@@ -187,7 +187,7 @@ class AnalystIAGraph:
         {messages_content}
         
         La base de datos tiene esta estructura:
-        {json.dump(dict_tables)}
+        {json.dumps(dict_tables)}
 
         Responde con un análisis claro y estructurado de la solicitud.
         """
@@ -213,7 +213,7 @@ class AnalystIAGraph:
         Análisis previo: {state.agent_analysis}
         
         La base de datos tiene esta estructura:
-        {json.dump(dict_tables)}
+        {json.dumps(dict_tables)}
         
         Evalúa si:
         1. La consulta es demasiado ambigua para generar una respuesta precisa
@@ -352,6 +352,8 @@ class AnalystIAGraph:
         - Consultas que necesitan datos agregados Y detalles específicos
         - Análisis temporales que requieren múltiples perspectivas
         
+        Siempre intenta generar de menos a mas, primero queries sencillas y de reconocimiento, luego si las anteriores funciona
+        y es necesario mayor omplejidad genera mas complejas
         Ejemplos:
         - "Lista empleados" → SINGLE
         - "Análisis completo de salarios por departamento con empleados mejor pagados" → MULTIPLE
@@ -818,7 +820,7 @@ class AnalystIAGraph:
         if isinstance(obj, BaseModel):
             return obj.dict() if hasattr(obj, 'dict') else obj.model_dump()
         if isinstance(obj, Sequence) and not isinstance(obj, str):
-            return [RetellIAGraph._serialise(o) for o in obj]
+            return [AnalystIAGraph._serialise(o) for o in obj]
         return obj
 
     
