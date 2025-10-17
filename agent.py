@@ -66,6 +66,11 @@ class FlowState(BaseModel):
     query_evaluation: Optional[Dict[str, Any]] = None
     data_analysis: Optional[str] = None
     
+    # Validación de tablas
+    validated_tables: Dict[str, Dict[str, Any]] = {}  # Almacena muestras y metadatos de tablas validadas
+    table_samples: Dict[str, List[Dict[str, Any]]] = {}  # Muestras de datos de cada tabla
+    table_validation_errors: List[str] = []  # Errores encontrados durante la validación
+    
     # Control de flujo
     is_sql_valid: bool = False
     needs_retry: bool = False
@@ -74,6 +79,11 @@ class FlowState(BaseModel):
     insufficient_data: bool = False
     requires_multiple_queries: bool = False
     current_query_index: int = 0
+    
+    # Control de reintentos
+    retry_count: int = 0
+    max_retries: int = 3
+    error_messages: List[str] = []  # Para almacenar mensajes de error de intentos anteriores
     
     def __getitem__(self, k):
         return getattr(self, k)
@@ -107,6 +117,7 @@ class AnalystIAGraph:
         sg.add_node('agent_coordinator', self.agent_coordinator)
         sg.add_node('ambiguity_detector', self.ambiguity_detector)
         sg.add_node('clarification_handler', self.clarification_handler)
+        sg.add_node('table_validator', self.table_validator)
         sg.add_node('sql_agent', self.sql_agent)
         sg.add_node('sql_process', self.sql_process)
         sg.add_node('multi_query_processor', self.multi_query_processor)
@@ -122,8 +133,11 @@ class AnalystIAGraph:
         # Edge ambigüedades
         sg.add_conditional_edges(
             'ambiguity_detector',
-            lambda st: 'clarification_handler' if st.is_ambiguous or st.insufficient_data else 'sql_agent',
+            lambda st: 'clarification_handler' if st.is_ambiguous or st.insufficient_data else 'table_validator',
         )
+        
+        # Conectar el validador de tablas al agente SQL
+        sg.add_edge('table_validator', 'sql_agent')
         
         # Decidir si usar procesamiento simple o múltiple
         sg.add_conditional_edges(
@@ -137,7 +151,7 @@ class AnalystIAGraph:
         # Edge condicional basado en validación SQL
         sg.add_conditional_edges(
             'sql_evaluator',
-            lambda st: 'data_analyst' if st.is_sql_valid else 'data_analyst',  # Siempre continuar para evitar bucles
+            lambda st: 'sql_agent' if st.needs_retry and st.retry_count < st.max_retries else 'data_analyst'
         )
         sg.add_edge('data_analyst', END)
         sg.add_edge('clarification_handler', END)
@@ -163,6 +177,11 @@ class AnalystIAGraph:
         state.insufficient_data = False
         state.requires_multiple_queries = False
         state.current_query_index = 0
+        state.validated_tables = {}
+        state.table_samples = {}
+        state.table_validation_errors = []
+        state.retry_count = 0
+        state.error_messages = []
         
         #Convertir input a messages
         if state.input and not state.messages:
@@ -200,6 +219,150 @@ class AnalystIAGraph:
             state.agent_analysis = f"Error en análisis: {str(e)}"
             
         return state
+        
+    def table_validator(self, state: FlowState) -> FlowState:
+        """
+        Validador de tablas que ejecuta queries de muestra para verificar la estructura y datos
+        antes de generar las consultas SQL principales.
+        """
+        messages_content = self._extract_content_from_messages(state.messages)
+        
+        # Primero, analizar qué tablas podrían ser relevantes para la consulta
+        prompt = f"""
+        Identifica las tablas que podrían ser relevantes para responder la siguiente consulta:
+        
+        Consulta del usuario: {messages_content}
+        Análisis previo: {state.agent_analysis}
+        
+        La base de datos tiene estas tablas:
+        {json.dumps(dict_tables)}
+        
+        Responde con un objeto JSON que contenga un array de nombres de tablas:
+        {{
+            "tables": ["nombre_tabla1", "nombre_tabla2", ...]
+        }}
+        """
+        
+        try:
+            response = self.llm.invoke(prompt).content.strip()
+            
+            # Extraer lista de tablas del JSON
+            tables_to_validate = []
+            
+            # Buscar y extraer el JSON
+            import re
+            json_match = re.search(r'\{[\s\S]*\}', response)
+            if json_match:
+                try:
+                    tables_json = json.loads(json_match.group(0))
+                    if isinstance(tables_json, dict) and "tables" in tables_json:
+                        tables_to_validate = tables_json["tables"]
+                except json.JSONDecodeError:
+                    # Fallback: buscar nombres de tablas en la respuesta
+                    for table_info in dict_tables.get("tables", []):
+                        table_name = table_info.get("name")
+                        if table_name and table_name in response:
+                            tables_to_validate.append(table_name)
+            
+            # Si no se encontraron tablas, usar todas las disponibles
+            if not tables_to_validate:
+                tables_to_validate = [table_info.get("name") for table_info in dict_tables.get("tables", [])]
+                
+            # Validar cada tabla identificada
+            for table_name in tables_to_validate:
+                self._validate_single_table(state, table_name)
+                
+            # Si no se pudieron validar todas las tablas, registrar el error
+            if state.table_validation_errors:
+                logging.warning(f"Errores en validación de tablas: {state.table_validation_errors}")
+                
+        except Exception as e:
+            logging.error(f"Error en table_validator: {str(e)}")
+            state.table_validation_errors.append(f"Error general: {str(e)}")
+            
+        return state
+        
+    def _validate_single_table(self, state: FlowState, table_name: str) -> None:
+        """
+        Valida una tabla específica ejecutando consultas de muestra
+        y almacenando los resultados en el estado.
+        """
+        # Verificar si la tabla está definida en dict_tables
+        table_definition = None
+        for table_info in dict_tables.get("tables", []):
+            if table_info.get("name") == table_name:
+                table_definition = table_info
+                break
+                
+        if not table_definition:
+            state.table_validation_errors.append(f"Tabla '{table_name}' no encontrada en la definición")
+            return
+            
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            # Consulta 1: Obtener muestra de datos (máximo 10 filas)
+            sample_query = f"SELECT * FROM {table_name} LIMIT 10"
+            cursor.execute(sample_query)
+            sample_rows = cursor.fetchall()
+            
+            # Convertir a lista de diccionarios
+            sample_data = [dict(row) for row in sample_rows]
+            
+            # Consulta 2: Contar registros totales
+            count_query = f"SELECT COUNT(*) as total_rows FROM {table_name}"
+            cursor.execute(count_query)
+            count_result = cursor.fetchone()
+            total_rows = count_result["total_rows"] if count_result else 0
+            
+            # Consulta 3: Para cada columna numérica, obtener estadísticas básicas
+            column_stats = {}
+            for column_info in table_definition.get("columns", []):
+                column_name = column_info.get("name")
+                column_type = column_info.get("type", "").lower()
+                
+                if column_type in ["integer", "double precision", "numeric", "decimal", "float"]:
+                    try:
+                        stats_query = f"""
+                        SELECT 
+                            COUNT(*) AS count,
+                            COUNT(*) FILTER(WHERE {column_name} IS NULL) AS null_count,
+                            AVG({column_name}) AS avg,
+                            MIN({column_name}) AS min,
+                            MAX({column_name}) AS max
+                        FROM {table_name}
+                        """
+                        cursor.execute(stats_query)
+                        stats = cursor.fetchone()
+                        if stats:
+                            column_stats[column_name] = dict(stats)
+                    except Exception as e:
+                        logging.warning(f"Error al obtener estadísticas para {column_name}: {str(e)}")
+                        column_stats[column_name] = {"error": str(e)}
+                
+            # Guardar toda la información validada
+            state.validated_tables[table_name] = {
+                "exists": True,
+                "definition": table_definition,
+                "total_rows": total_rows,
+                "column_stats": column_stats
+            }
+            
+            state.table_samples[table_name] = sample_data
+            
+            cursor.close()
+            conn.close()
+            
+        except Exception as e:
+            error_msg = f"Error validando tabla '{table_name}': {str(e)}"
+            state.table_validation_errors.append(error_msg)
+            state.validated_tables[table_name] = {
+                "exists": False,
+                "error": str(e),
+                "definition": table_definition
+            }
+            logging.error(error_msg)
 
     def ambiguity_detector(self, state: FlowState) -> FlowState:
         """Detecta si la consulta es ambigua o falta información"""
@@ -371,11 +534,6 @@ class AnalystIAGraph:
 
         Política de filtrado y normalización (guía para la fase de generación):
         - Estandariza texto: usar UPPER(TRIM(col)) para comparar con literales canónicos.
-        - Canoniza dominios con CASE o join a dimensión si existe (ej.: zone_type → <WEALTHY, NON WEALTHY>).
-        - Fechas relativas: traducir “última semana/mes/N días” a rangos con CURRENT_DATE - INTERVAL 'N days'.
-        - Nulos: usar FILTER(WHERE col IS NOT NULL) en agregados; COALESCE en métricas de salida con fallback explícito.
-        - Tipos: castear seguro (NULLIF(col,'')::numeric) si hay numéricos en texto.
-        - Parámetros: no interpolar literales; usar placeholders (:country, :metric, :start_date, :end_date).
         - Relajación progresiva si 0 filas: 1) quitar topes secundarios, 2) expandir dominios, 3) aflojar fechas, 4) revisar casing/espacios.
         - Evitar ORDER BY en subconsultas salvo necesario. Solo ordenar en el resultado final.
         - Dialecto por defecto: PostgreSQL. Si una función no existe, usar alternativa ANSI.
@@ -410,11 +568,41 @@ class AnalystIAGraph:
     def _generate_single_query(self, state: FlowState, messages_content: str) -> FlowState:
         """Genera una sola consulta SQL"""
         
+        # Preparar información de tablas validadas
+        validated_tables_info = {}
+        for table_name, validation_data in state.validated_tables.items():
+            if validation_data.get("exists", False):
+                sample_data = state.table_samples.get(table_name, [])
+                sample_snippet = sample_data[:3] if sample_data else []
+                
+                validated_tables_info[table_name] = {
+                    "definition": validation_data.get("definition", {}),
+                    "total_rows": validation_data.get("total_rows", 0),
+                    "sample_data": sample_snippet,
+                    "column_stats": validation_data.get("column_stats", {})
+                }
+        
+        # Construir la sección de errores anteriores si existen
+        previous_errors = ""
+        if state.retry_count > 0 and state.error_messages:
+            previous_errors = "\nERRORES PREVIOS (debes corregirlos):\n"
+            for i, error in enumerate(state.error_messages):
+                previous_errors += f"{i+1}. {error}\n"
+                
+            # Si hay una consulta previa que falló, incluirla
+            if state.sql_query and not state.sql_query.startswith("ERROR") and not state.sql_query == "NO_SQL_NEEDED":
+                previous_errors += f"\nConsulta anterior que falló:\n{state.sql_query}\n"
+        
         prompt = f"""
         Genera una consulta SQL PostgreSQL para responder a:
         
         Consulta: {messages_content}
         Análisis previo: {state.agent_analysis}
+        Intento: {state.retry_count + 1} de {state.max_retries}
+        
+        INFORMACIÓN DE TABLAS VALIDADAS:
+        {json.dumps(validated_tables_info, indent=2)}
+        {previous_errors}
         
         Restricciones de salida:
         - Solo SELECT (se permite WITH/CTEs).
@@ -422,29 +610,18 @@ class AnalystIAGraph:
         - Devuelve ÚNICAMENTE la consulta SQL.
         - Si no aplica SQL, responde: NO_SQL_NEEDED.
 
-        Política de construcción (aplícalas dentro de la misma consulta):
-        1) Parámetros:
-        - Usa placeholders con nombre: :country, :metric, :start_date, :end_date, etc.
-        2) Filtrado y normalización:
-        - Comparaciones de texto con UPPER(TRIM(col)) contra literales canónicos.
-        - Dominios canónicos vía CASE o join a dimensiones si procede.
-        - Fechas relativas con BETWEEN :start_date AND :end_date.
-        3) Nulos y tipos:
-        - Agregados con FILTER(WHERE col IS NOT NULL) o COALESCE según el caso.
-        - Casteo seguro para numéricos en texto: NULLIF(col,'')::numeric.
-        4) Joins:
-        - Solo los necesarios. Especifica ON claro y evita cartesianas.
-        - Elige LEFT JOIN si la ausencia de la tabla secundaria no debe descartar filas.
-        5) Métricas:
-        - Usa window functions cuando convenga (ROW_NUMBER, SUM() OVER, percentiles).
-        - Evita ORDER BY en CTEs; ordena solo en el resultado final.
-        6) Rendimiento:
-        - Proyecta solo columnas necesarias.
-        - Aplica filtros lo antes posible (en CTE base).
-        7) Tolerancia a 0 filas:
-        - No “relajes” filtros fuera de la consulta. Mantén exactitud; no inventes datos.
-        8) Dialecto:
-        - PostgreSQL por defecto. Para percentiles: percentile_cont(x) WITHIN GROUP (ORDER BY col).
+        Estrategia y reglas:
+        1) Usa la información de tablas validadas en lugar de hacer queries de reconocimiento.
+        2) Cobertura analítica:
+        - Incluye al menos dos de estos frentes según la consulta:
+            a) Agregados/estadísticas (AVG, SUM, COUNT DISTINCT, percentiles).
+            b) Listados/detalle con ORDER BY y LIMIT.
+            c) Comparaciones/rankings por grupo.
+            d) Análisis temporal con rangos de fechas o ventanas.
+        3) Filtrado y normalización:
+        - Comparar texto con UPPER(TRIM(col)) y literales canónicos.
+        4) Verifica los nombres y tipos de columnas usando la información validada.
+        5) Si es un reintento, asegúrate de corregir los errores previos.
 
         IMPORTANTE: 
         - NO incluyas ```sql ni ``` ni ningún markdown
@@ -466,18 +643,46 @@ class AnalystIAGraph:
     def _generate_multiple_queries(self, state: FlowState, messages_content: str) -> FlowState:
         """Genera múltiples consultas SQL para análisis complejo"""
         
+        # Preparar información de tablas validadas
+        validated_tables_info = {}
+        for table_name, validation_data in state.validated_tables.items():
+            if validation_data.get("exists", False):
+                sample_data = state.table_samples.get(table_name, [])
+                sample_snippet = sample_data[:3] if sample_data else []
+                
+                validated_tables_info[table_name] = {
+                    "definition": validation_data.get("definition", {}),
+                    "total_rows": validation_data.get("total_rows", 0),
+                    "sample_data": sample_snippet,
+                    "column_stats": validation_data.get("column_stats", {})
+                }
+        
+        # Construir la sección de errores anteriores si existen
+        previous_errors = ""
+        if state.retry_count > 0 and state.error_messages:
+            previous_errors = "\nERRORES PREVIOS (debes corregirlos):\n"
+            for i, error in enumerate(state.error_messages):
+                previous_errors += f"{i+1}. {error}\n"
+                
+            # Si hay consultas previas que fallaron, incluirlas
+            if state.sql_queries:
+                previous_errors += f"\nConsultas anteriores que fallaron:\n"
+                for i, query in enumerate(state.sql_queries):
+                    previous_errors += f"QUERY_{i+1}: {query}\n"
+        
         prompt = f"""
         Genera una lista de consultas SQL PostgreSQL para un análisis completo de:
         
         Consulta: {messages_content}
         Análisis previo: {state.agent_analysis}
+        Intento: {state.retry_count + 1} de {state.max_retries}
         
-        Genera de 2 a 10 consultas que cubran diferentes aspectos del análisis ejemplo:
-        1. Datos agregados/estadísticas
-        2. Datos específicos/listados
-        3. Comparaciones/rankings
-        4. Análisis temporal (si aplica)
+        INFORMACIÓN DE TABLAS VALIDADAS:
+        {json.dumps(validated_tables_info, indent=2)}
+        {previous_errors}
         
+        Genera de 2 a 10 consultas que cubran la peticion del usuario:
+
         FORMATO DE RESPUESTA:
         QUERY_1: [consulta SQL 1]
         QUERY_2: [consulta SQL 2]
@@ -485,11 +690,7 @@ class AnalystIAGraph:
         QUERY_4: [consulta SQL 4]
         
         Estrategia y reglas:
-        1) Reconocimiento (si hay más de una tabla o filtros dudosos):
-        - Incluye primero queries de reconocimiento sobre cada tabla relevante:
-            - SELECT * FROM <schema>.<tabla> LIMIT 10
-            - SELECT DISTINCT <campos_clave_de_filtro> FROM <schema>.<tabla>
-        - Estas cuentan dentro del total de 2–4 queries.
+        1) Usa la información de tablas ya validadas en vez de hacer queries de reconocimiento.
         2) Cobertura analítica:
         - Incluye al menos dos de estos frentes según la consulta:
             a) Agregados/estadísticas (AVG, SUM, COUNT DISTINCT, percentiles).
@@ -498,18 +699,8 @@ class AnalystIAGraph:
             d) Análisis temporal con rangos de fechas o ventanas.
         3) Filtrado y normalización:
         - Comparar texto con UPPER(TRIM(col)) y literales canónicos.
-        - Fechas con BETWEEN :start_date AND :end_date.
-        - Usa placeholders con nombre (:country, :metric, etc.).
-
-        Politicas de Construcion:
-        - Normalización de texto en filtros: UPPER(TRIM(col)) = UPPER(TRIM(:param)).
-        - Dominios canónicos con CASE o join a dimensiones si existen.
-        - Fechas: BETWEEN :start_date AND :end_date. Para “últimos N días” asume parámetros.
-        - Nulos: usa FILTER(WHERE col IS NOT NULL) en agregados o COALESCE según convenga.
-        - Casteo seguro: NULLIF(col,'')::numeric para numéricos en texto.
-        - Joins: solo los necesarios; LEFT JOIN si no quieres descartar filas por faltantes.
-        - Evita ORDER BY en CTEs; ordenar solo en el resultado final.
-        - Proyecta solo columnas necesarias.
+        4) Verifica los nombres y tipos de columnas usando la información validada.
+        5) Si es un reintento, asegúrate de corregir los errores previos de manera específica.
 
         IMPORTANTE:
         - Solo consultas SELECT
@@ -518,10 +709,10 @@ class AnalystIAGraph:
         - Si no necesitas todas las 4 queries, usa solo las necesarias
         
         Ejemplo mínimo:
-        QUERY_1: SELECT * FROM public.employees LIMIT 10
-        QUERY_2: SELECT DISTINCT UPPER(TRIM(department)) AS department FROM public.employees
-        QUERY_3: SELECT department, AVG(salary) AS avg_salary FROM public.employees GROUP BY department
-        QUERY_4: SELECT * FROM public.employees WHERE salary > :min_salary ORDER BY salary DESC
+        QUERY_1: SELECT department, AVG(salary) AS avg_salary FROM public.employees GROUP BY department
+        QUERY_2: SELECT * FROM public.employees WHERE salary > (SELECT AVG(salary) FROM public.employees) ORDER BY salary DESC LIMIT 10
+        QUERY_3: SELECT EXTRACT(YEAR FROM hire_date) AS year, COUNT(*) as hires FROM public.employees GROUP BY year ORDER BY year
+        QUERY_4: SELECT department, job_title, COUNT(*) as employee_count FROM public.employees GROUP BY department, job_title ORDER BY department, employee_count DESC
         """
         
         try:
@@ -692,36 +883,88 @@ class AnalystIAGraph:
         
         if not state.sql_query or state.sql_query.startswith("ERROR"):
             state.is_sql_valid = False
+            state.needs_retry = True
             state.query_evaluation = {"valid": False, "reason": "Consulta SQL inválida o con errores"}
+            state.error_messages.append("La consulta SQL es inválida o contiene errores de sintaxis.")
             return state
             
         if state.sql_query == "NO_SQL_NEEDED":
             state.is_sql_valid = True
+            state.needs_retry = False
             state.query_evaluation = {"valid": True, "reason": "No se requiere consulta SQL"}
             return state
             
         # Evaluar si hay errores en los resultados
         if isinstance(state.sql_results, dict):
             if "error" in state.sql_results:
-                # IMPORTANTE: No reintentar si ya hay un error - evitar bucles
-                state.is_sql_valid = True  # Marcar como válido para seguir al siguiente paso
-                state.query_evaluation = {
-                    "valid": False, 
-                    "reason": f"Error en ejecución: {state.sql_results['error']}",
-                    "continue_anyway": True
-                }
+                error_msg = state.sql_results.get("error", "Error desconocido")
+                # Incrementar contador de reintentos y verificar límite
+                state.retry_count += 1
+                state.error_messages.append(f"Intento {state.retry_count}: {error_msg}")
+                
+                if state.retry_count >= state.max_retries:
+                    # Alcanzó límite de reintentos - continuar al siguiente paso pero marcar como fallido
+                    state.is_sql_valid = False
+                    state.needs_retry = False
+                    state.query_evaluation = {
+                        "valid": False, 
+                        "reason": f"Error después de {state.retry_count} intentos: {error_msg}",
+                        "errors": state.error_messages,
+                        "continue_anyway": True  # Continuar al siguiente paso
+                    }
+                else:
+                    # Todavía puede reintentar
+                    state.is_sql_valid = False
+                    state.needs_retry = True
+                    state.query_evaluation = {
+                        "valid": False, 
+                        "reason": f"Error en ejecución: {error_msg}",
+                        "errors": state.error_messages,
+                        "attempt": state.retry_count,
+                        "max_attempts": state.max_retries
+                    }
             else:
+                # Consulta exitosa
                 state.is_sql_valid = True
+                state.needs_retry = False
                 if state.requires_multiple_queries:
                     successful_queries = state.sql_results.get("successful_queries", 0)
                     total_queries = state.sql_results.get("total_queries", 0)
-                    state.query_evaluation = {
-                        "valid": True,
-                        "reason": f"Múltiples consultas ejecutadas: {successful_queries}/{total_queries} exitosas",
-                        "total_rows_found": state.sql_results.get("total_rows_found", 0),
-                        "total_rows_returned": state.sql_results.get("total_rows_returned", 0)
-                    }
+                    
+                    # Verificar si hay suficientes consultas exitosas
+                    if successful_queries < total_queries * 0.5:  # Si menos del 50% fueron exitosas
+                        state.retry_count += 1
+                        state.error_messages.append(f"Intento {state.retry_count}: Solo {successful_queries} de {total_queries} consultas fueron exitosas")
+                        
+                        if state.retry_count >= state.max_retries:
+                            state.is_sql_valid = False
+                            state.needs_retry = False
+                            state.query_evaluation = {
+                                "valid": False,
+                                "reason": f"Demasiadas consultas fallaron después de {state.retry_count} intentos",
+                                "errors": state.error_messages,
+                                "continue_anyway": True
+                            }
+                        else:
+                            state.is_sql_valid = False
+                            state.needs_retry = True
+                            state.query_evaluation = {
+                                "valid": False,
+                                "reason": f"Solo {successful_queries} de {total_queries} consultas fueron exitosas. Reintentando...",
+                                "errors": state.error_messages,
+                                "attempt": state.retry_count,
+                                "max_attempts": state.max_retries
+                            }
+                    else:
+                        # Suficientes consultas exitosas
+                        state.query_evaluation = {
+                            "valid": True,
+                            "reason": f"Múltiples consultas ejecutadas: {successful_queries}/{total_queries} exitosas",
+                            "total_rows_found": state.sql_results.get("total_rows_found", 0),
+                            "total_rows_returned": state.sql_results.get("total_rows_returned", 0)
+                        }
                 else:
+                    # Consulta simple exitosa
                     state.query_evaluation = {
                         "valid": True,
                         "reason": "Consulta ejecutada exitosamente",
@@ -732,14 +975,34 @@ class AnalystIAGraph:
         else:
             # Formato legacy - lista
             if state.sql_results and isinstance(state.sql_results[0], dict) and "error" in state.sql_results[0]:
-                state.is_sql_valid = True
-                state.query_evaluation = {
-                    "valid": False, 
-                    "reason": f"Error en ejecución: {state.sql_results[0]['error']}",
-                    "continue_anyway": True
-                }
+                error_msg = state.sql_results[0].get("error", "Error desconocido")
+                # Incrementar contador de reintentos
+                state.retry_count += 1
+                state.error_messages.append(f"Intento {state.retry_count}: {error_msg}")
+                
+                if state.retry_count >= state.max_retries:
+                    state.is_sql_valid = False
+                    state.needs_retry = False
+                    state.query_evaluation = {
+                        "valid": False, 
+                        "reason": f"Error después de {state.retry_count} intentos: {error_msg}",
+                        "errors": state.error_messages,
+                        "continue_anyway": True
+                    }
+                else:
+                    state.is_sql_valid = False
+                    state.needs_retry = True
+                    state.query_evaluation = {
+                        "valid": False, 
+                        "reason": f"Error en ejecución: {error_msg}",
+                        "errors": state.error_messages,
+                        "attempt": state.retry_count,
+                        "max_attempts": state.max_retries
+                    }
             else:
+                # Resultado exitoso en formato legacy
                 state.is_sql_valid = True
+                state.needs_retry = False
                 state.query_evaluation = {
                     "valid": True, 
                     "reason": "Consulta ejecutada exitosamente",
@@ -752,6 +1015,15 @@ class AnalystIAGraph:
         """Analiza los resultados y genera insights"""
         
         messages_content = self._extract_content_from_messages(state.messages)
+        
+        # Preparar información de tablas validadas para el análisis
+        validated_tables_summary = {}
+        for table_name, validation_data in state.validated_tables.items():
+            if validation_data.get("exists", False):
+                validated_tables_summary[table_name] = {
+                    "total_rows": validation_data.get("total_rows", 0),
+                    "columns": [col.get("name") for col in validation_data.get("definition", {}).get("columns", [])]
+                }
         
         if state.sql_query == "NO_SQL_NEEDED":
             prompt = f"""
@@ -769,6 +1041,9 @@ class AnalystIAGraph:
             Consulta original: {messages_content}
             Número de consultas ejecutadas: {len(state.all_sql_results)}
             
+            Información de tablas validadas:
+            {json.dumps(validated_tables_summary)}
+            
             Resultados detallados:
             {self._format_multiple_results_for_analysis(state.all_sql_results)}
             
@@ -780,6 +1055,7 @@ class AnalystIAGraph:
             5. **Recomendaciones** basadas en el análisis completo
             
             Estructura tu respuesta de manera clara y profesional, destacando los puntos más importantes.
+            Utiliza la información de la estructura y datos de muestra de las tablas para enriquecer tu análisis.
             """
         else:
             # Análisis de query simple
@@ -788,6 +1064,10 @@ class AnalystIAGraph:
             
             Consulta original: {messages_content}
             Consulta SQL ejecutada: {state.sql_query}
+            
+            Información de tablas validadas:
+            {json.dumps(validated_tables_summary)}
+            
             Resultados: {state.sql_results}
             
             Proporciona:
@@ -797,6 +1077,7 @@ class AnalystIAGraph:
             4. Recomendaciones si aplica
             
             Responde de manera clara y profesional.
+            Utiliza la información de la estructura y datos de muestra de las tablas para enriquecer tu análisis.
             """
         
         try:
@@ -950,6 +1231,11 @@ class AnalystIAGraph:
                 'all_sql_results': self._serialise(final_state.get('all_sql_results', [])),
                 'query_evaluation': final_state.get('query_evaluation'),
                 'data_analysis': final_state.get('data_analysis'),
+                'validated_tables': self._serialise(final_state.get('validated_tables', {})),
+                'table_validation_errors': final_state.get('table_validation_errors', []),
+                'retry_count': final_state.get('retry_count', 0),
+                'error_messages': final_state.get('error_messages', []),
+                'needs_retry': final_state.get('needs_retry', False),
                 'summary': final_state.get('data_analysis') or final_state.get('agent_analysis') or "No se pudo generar resumen"
             }
             
