@@ -2,13 +2,6 @@
 
 Sistema de análisis automatizado que conecta flujos n8n con un MCP (Model Control Point) para procesar consultas, análisis y coordinación inteligente de datos operativos en Rappi.
 
----
-
-## 🎥 Demo
-- **Captura del chat (stack)**: `/demo/chat.png`
-- **Arquitectura**: `cliente → n8n → MCP → serve → PostgreSQL`
-- **Stack visual:** LangGraph para flujos internos y coordinación de agentes.
----
 
 ## ⚙️ Stack Técnico
 | Componente | Descripción |
@@ -172,6 +165,7 @@ docker compose up --build
 
 
 ```
+
 
 
 
