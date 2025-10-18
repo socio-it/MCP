@@ -8,7 +8,6 @@ Sistema de análisis automatizado que conecta flujos n8n con un MCP (Model Contr
 - **Captura del chat (stack)**: `/demo/chat.png`
 - **Arquitectura**: `cliente → n8n → MCP → serve → PostgreSQL`
 - **Stack visual:** LangGraph para flujos internos y coordinación de agentes.
-
 ---
 
 ## ⚙️ Stack Técnico
@@ -19,7 +18,7 @@ Sistema de análisis automatizado que conecta flujos n8n con un MCP (Model Contr
 | **DB** | PostgreSQL |
 | **Infraestructura** | Docker + UV (entorno reproducible) |
 | **Flujo SSE** | n8n ↔ MCP (comunicación en tiempo real) |
-
+![n8n Chat](img/Chat n8n.png)
 ---
 
 ## 🧱 Arquitectura General
@@ -165,6 +164,7 @@ En este modo se levanta **todo el sistema completo** (FastMCP + PostgreSQL) dent
 
 ```bash
 docker compose up --build
+
 
 
 
