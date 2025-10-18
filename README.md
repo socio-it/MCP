@@ -30,7 +30,7 @@ La interacción sigue el flujo **Cliente → n8n → MCP → LangGraph → Postg
 
 ### 1️⃣ Frontend e Interfaz Conversacional (n8n)
 
-![n8n Chat](./img/Chat n8n.png)
+![Chat n8n](img/Chat%20n8n.png)
 
 - **Componente:** flujo *Rappi Multiagent Data Insights*.
 - **Función:** interfaz de chat embebida en web (n8n webhook).
@@ -44,7 +44,7 @@ La interacción sigue el flujo **Cliente → n8n → MCP → LangGraph → Postg
 
 ### 2️⃣ Procesamiento de Datos y Memoria (n8n + LangGraph + MCP)
 
-![Rappi Multiagent Data Insights](./Rappi%20Multiagent%20Data%20insights.png)
+![Rappi Multiagent Data Insights](img/Rappi%20Multiagent%20Data%20insights.png)
 
 - **Subflujos principales:**
   - **RAG:** permite subir documentos (PDF, CSV) y genera *embeddings* para ampliar contexto.
@@ -63,7 +63,8 @@ La interacción sigue el flujo **Cliente → n8n → MCP → LangGraph → Postg
 
 ### 3️⃣ MCP Server y LangGraph Multiagente
 
-![MCP Server Herramientas](./MCP%20server%20herramientas.png)
+![MCP server herramientas](img/MCP%20server%20herramientas.png)
+
 
 El **MCP Server** orquesta la ejecución de un **LangGraph multiagente** que contiene agentes especializados para distintos tipos de análisis.
 
@@ -81,8 +82,7 @@ El **MCP Server** orquesta la ejecución de un **LangGraph multiagente** que con
 
 ### 4️⃣ Flujo de LangGraph (procesamiento SQL e inferencia)
 
-![LangGraph Estructura](./langgraph%20estructura.png)
-
+![langgraph estructura](img/langgraph%20estructura.png)
 **Etapas del grafo:**
 1. `ingest`: entrada del mensaje del usuario.
 2. `agent_coordinator`: delega según el tipo de tarea.
@@ -98,7 +98,7 @@ El **MCP Server** orquesta la ejecución de un **LangGraph multiagente** que con
 
 ### 5️⃣ Generación Automática de Reportes
 
-![Rappi Multiagent Report](./Rappi%20Multiagent%20Report.png)
+![Rappi Multiagent Report](img/Rappi%20Multiagent%20Report.png)
 
 Este flujo se activa automáticamente cuando el *clasificador* detecta intención de reporte.
 
@@ -112,7 +112,7 @@ Este flujo se activa automáticamente cuando el *clasificador* detecta intenció
 
 ### 🔄 Flujo resumido
 
-```plaintext
+
 Usuario
   ↓
 n8n Chat (Webhook)
@@ -130,7 +130,8 @@ Respuesta o Reporte → n8n → Usuario
 
 
 ---
-## ⚙️ Instalación y Ejecución
+
+### ⚙️ Instalación y Ejecución
 
 El sistema puede ejecutarse de dos formas:  
 1. **Modo local (desarrollo rápido con UV)**  
@@ -156,7 +157,11 @@ uv sync
 # Inicia el servidor FastMCP local
 uv run fastmcp serve --port 8000
 
+```
+
 ### 🐳 2️⃣ Modo producción — stack completo con Docker Compose
+
+![Contenedores Docker n8n MCP-server y company-postgres](img/contenedores%20docker%20n8n%20mcp-server%20y%20company-postgres.png)
 
 En este modo se levanta **todo el sistema completo** (FastMCP + PostgreSQL) dentro de contenedores, replicando el entorno de despliegue real.
 
@@ -164,6 +169,10 @@ En este modo se levanta **todo el sistema completo** (FastMCP + PostgreSQL) dent
 
 ```bash
 docker compose up --build
+
+
+```
+
 
 
 
