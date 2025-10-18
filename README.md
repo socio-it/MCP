@@ -1,6 +1,6 @@
 # Caso Técnico: Sistema de Análisis Inteligente para Operaciones Rappi
 
-Sistema de análisis automatizado que conecta flujos n8n con un MCP (Model Control Point) para procesar consultas, análisis y coordinación inteligente de datos operativos en Rappi.
+Sistema de análisis automatizado que conecta flujos n8n con un MCP para procesar consultas, análisis y coordinación inteligente de datos operativos en Rappi.
 
 
 ## ⚙️ Stack Técnico
