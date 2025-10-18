@@ -30,7 +30,7 @@ La interacción sigue el flujo **Cliente → n8n → MCP → LangGraph → Postg
 
 ### 1️⃣ Frontend e Interfaz Conversacional (n8n)
 
-![n8n Chat](./Chat%20n8n.png)
+![n8n Chat](./img/Chat n8n.png)
 
 - **Componente:** flujo *Rappi Multiagent Data Insights*.
 - **Función:** interfaz de chat embebida en web (n8n webhook).
@@ -164,6 +164,7 @@ En este modo se levanta **todo el sistema completo** (FastMCP + PostgreSQL) dent
 
 ```bash
 docker compose up --build
+
 
 
 
