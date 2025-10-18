@@ -111,7 +111,7 @@ Este flujo se activa automáticamente cuando el *clasificador* detecta intenció
 ---
 
 ### 🔄 Flujo resumido
-
+```plaintext
 
 Usuario
   ↓
@@ -127,7 +127,7 @@ MCP Server (coordina ambos)
 PostgreSQL (persistencia)
   ↓
 Respuesta o Reporte → n8n → Usuario
-
+```
 
 ---
 
@@ -172,6 +172,7 @@ docker compose up --build
 
 
 ```
+
 
 
 
